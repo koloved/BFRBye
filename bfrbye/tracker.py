@@ -62,11 +62,27 @@ class HandTracker:
         proc = config.get("processing", {})
         self.processing_interval = proc.get("interval", 1)    # 1 = every frame
         self.mouth_padding = proc.get("mouth_padding", 0.5)   # zone inflation
+        self.trigger_frames = proc.get("trigger_frames", 5)   # consecutive detections
+        self.cooldown = proc.get("cooldown", 2.0)             # seconds after trigger
+        self._cam_w = proc.get("camera_width", 640)
+        self._cam_h = proc.get("camera_height", 480)
 
         self.webcam = cv2.VideoCapture(0)
+        self._ensure_webcam()  # apply configured resolution
         self.counter = 0
 
+        # Debounce / anti-rattle state
+        self._consecutive = 0
+        self._last_trigger_time = 0.0
+
     # ── helpers ────────────────────────────────────────────────
+
+    def _ensure_webcam(self):
+        """Open or re-open webcam and apply configured resolution."""
+        if not self.webcam.isOpened():
+            self.webcam.open(0)
+        self.webcam.set(cv2.CAP_PROP_FRAME_WIDTH, self._cam_w)
+        self.webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, self._cam_h)
 
     def _process(self, img_bgr):
         """Run inference on one frame and return (face_result, hand_result)."""
@@ -77,11 +93,17 @@ class HandTracker:
             self.hand_landmarker.detect(mp_image),
         )
 
-    def _draw_hud(self, img_bgr, fps=None):
+    def _draw_hud(self, img_bgr, fps=None, cooldown_active=False):
         """Draw debug HUD on the preview frame."""
+        now = time.time()
+        since_trigger = now - self._last_trigger_time if self._last_trigger_time else 99
+        cooldown_remaining = max(0, round(self.cooldown - since_trigger, 1))
+
         lines = [
-            f"Interval: {self.processing_interval}  ([ ] to change)",
-            f"Padding:  {self.mouth_padding:.1f}    (- = to change)",
+            f"Interval: {self.processing_interval}  ([ ])   "
+            f"Consec: {self._consecutive}/{self.trigger_frames}",
+            f"Padding:  {self.mouth_padding:.1f}  (- =)     "
+            f"Cooldown: {cooldown_remaining}s",
             f"Triggers: {self.counter}",
         ]
         if fps is not None:
@@ -91,12 +113,39 @@ class HandTracker:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 200), 2,
                         cv2.LINE_AA)
 
+    # ── debounce ───────────────────────────────────────────────
+
+    def _apply_debounce(self, picked):
+        """Return True only if detection is sustained and cooldown elapsed."""
+        now = time.time()
+
+        if picked:
+            self._consecutive += 1
+        else:
+            self._consecutive = 0
+            return False
+
+        if self._consecutive < self.trigger_frames:
+            return False  # not enough consecutive frames yet
+
+        # Enough frames — check cooldown
+        if now - self._last_trigger_time < self.cooldown:
+            return False
+
+        # TRIGGER
+        self._last_trigger_time = now
+        self._consecutive = 0
+        return True
+
     # ── modes ──────────────────────────────────────────────────
 
     def run(self):
         """Background tracking mode — no window, just triggers on detection."""
-        if not self.webcam.isOpened():
-            self.webcam.open(0)
+        # Re-read camera resolution from config (may have changed via GUI)
+        proc = self.config.get("processing", {})
+        self._cam_w = proc.get("camera_width", 640)
+        self._cam_h = proc.get("camera_height", 480)
+        self._ensure_webcam()
         while self.webcam.isOpened():
             ret, img_bgr = self.webcam.read()
             if not ret:
@@ -110,7 +159,7 @@ class HandTracker:
                 picked, _ = self.detect_fingertips_near_mouth(
                     img_bgr, face_result, hand_result, draw=False
                 )
-                if picked:
+                if self._apply_debounce(picked):
                     winsound.Beep(1500, 1000)
                     response = []
                     thread = threading.Thread(target=show_input_dialog, args=(response,))
@@ -119,6 +168,8 @@ class HandTracker:
 
                     if len(response):
                         save_response(response[0], self.config)
+            else:
+                self._consecutive = 0
 
         time.sleep(2)
         self.webcam.release()
@@ -126,15 +177,17 @@ class HandTracker:
 
     def run_preview(self):
         """Preview mode — shows camera feed with overlays in an OpenCV window."""
-        if not self.webcam.isOpened():
-            self.webcam.open(0)
+        # Re-read all tunable parameters from config (may have changed via GUI)
+        proc = self.config.get("processing", {})
+        self.processing_interval = proc.get("interval", 1)
+        self.mouth_padding = proc.get("mouth_padding", 0.5)
+        self._cam_w = proc.get("camera_width", 640)
+        self._cam_h = proc.get("camera_height", 480)
+
+        self._ensure_webcam()
         window_name = "BFRBye — Overlay Preview ([ ] interval, - = padding, R reset, Q quit)"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(window_name, 960, 720)
-
-        # Reset debug parameters to config values at start
-        self.processing_interval = self.config.get("processing", {}).get("interval", 1)
-        self.mouth_padding = self.config.get("processing", {}).get("mouth_padding", 0.5)
 
         frame_count = 0
         last_overlay = None   # cache last annotated frame for skipped intervals
@@ -171,7 +224,9 @@ class HandTracker:
                     picked, display = self.detect_fingertips_near_mouth(
                         display, face_result, hand_result, draw=True
                     )
-                    trigger = picked
+                    trigger = self._apply_debounce(picked)
+                else:
+                    self._consecutive = 0
 
                 if trigger:
                     cv2.putText(display, "TRIGGER!", (20, 60),
@@ -179,7 +234,9 @@ class HandTracker:
 
                 last_overlay = display.copy()
             else:
-                # Skipped frame — show last overlay or raw frame
+                # Skipped frame — reset consecutive (we don't know hand is still there)
+                self._consecutive = 0
+                # Show last overlay or raw frame
                 display = last_overlay.copy() if last_overlay is not None else raw_bgr.copy()
 
             self._draw_hud(display, fps_display)

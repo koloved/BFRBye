@@ -9,11 +9,11 @@ from bfrbye.tracker import HandTracker
 
 def create_main_window():
     """
-    Creates the main application window with Start and Configuration buttons.
+    Creates the main application window with Start, Preview, and Configuration buttons.
     """
     root = tk.Tk()
     root.title("BFRBye")
-    root.geometry("280x120")
+    root.geometry("280x160")
 
     # Set icon
     icon_image = tk.PhotoImage(data=base64.b64decode(icon))
@@ -23,22 +23,47 @@ def create_main_window():
     config = load_config()
 
     # Tracker instance
-
     tracker = HandTracker(config)
+    tracker_active = [False]  # mutable container for nested access
 
     def start_tracking():
-        root.iconify()  # Minimiza ventana
-        
+        tracker_active[0] = True
+        root.iconify()  # Minimize window
+
         thread = Thread(target=tracker.run, daemon=True)
         thread.start()
         start_button.config(text="Running", state="disabled")
+        preview_button.config(state="disabled")
+
+    def start_preview():
+        tracker_active[0] = True
+        root.iconify()
+
+        thread = Thread(target=tracker.run_preview, daemon=True)
+        thread.start()
+        preview_button.config(text="Preview…", state="disabled")
+        start_button.config(state="disabled")
+
+        # Poll thread to re-enable buttons when preview closes
+        def check_thread():
+            if thread.is_alive():
+                root.after(500, check_thread)
+            else:
+                tracker_active[0] = False
+                preview_button.config(text="Preview", state="normal")
+                start_button.config(state="normal")
+                root.deiconify()
+        root.after(500, check_thread)
 
     # Buttons
     start_button = tk.Button(root, text="Start", command=start_tracking)
-    start_button.pack(pady=10)
+    start_button.pack(pady=8)
+
+    preview_button = tk.Button(root, text="Preview", command=start_preview)
+    preview_button.pack(pady=8)
 
     config_button = tk.Button(root, text="Configuration", command=lambda: open_config_window(root, config))
-    config_button.pack(pady=10)
+    config_button.pack(pady=8)
 
     return root
 

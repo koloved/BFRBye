@@ -65,22 +65,16 @@ class HandTracker:
         self.counter = 0
 
     def run(self):
+        """Background tracking mode — no window, just triggers on detection."""
         while self.webcam.isOpened():
             ret, img_bgr = self.webcam.read()
             if not ret:
                 break
 
-            # Convert BGR -> RGB (OpenCV captures in BGR)
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-
-            # Wrap in mp.Image for the Tasks API
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-
-            # Run inference
             face_result = self.face_landmarker.detect(mp_image)
             hand_result = self.hand_landmarker.detect(mp_image)
-
-            # Convert back to BGR for OpenCV drawing
             img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
             if hand_result.hand_landmarks and face_result.face_landmarks:
@@ -100,6 +94,40 @@ class HandTracker:
         time.sleep(2)
         self.webcam.release()
         cv2.destroyAllWindows()
+
+    def run_preview(self):
+        """Preview mode — shows camera feed with overlays in an OpenCV window."""
+        window_name = "BFRBye — Overlay Preview (press Q to close)"
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window_name, 960, 720)
+
+        while self.webcam.isOpened():
+            ret, img_bgr = self.webcam.read()
+            if not ret:
+                break
+
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+            face_result = self.face_landmarker.detect(mp_image)
+            hand_result = self.hand_landmarker.detect(mp_image)
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+            if hand_result.hand_landmarks and face_result.face_landmarks:
+                picked, img_bgr = self.detect_fingertips_near_mouth(
+                    img_bgr, face_result, hand_result
+                )
+                if picked:
+                    # Show a brief visual flash instead of dialog in preview mode
+                    cv2.putText(img_bgr, "TRIGGER!", (20, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+
+            cv2.imshow(window_name, img_bgr)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+
+        self.webcam.release()
+        cv2.destroyWindow(window_name)
 
     def detect_fingertips_near_mouth(self, img_bgr, face_result, hand_result):
         """Check if any fingertip is near the mouth area using Face Landmarker."""

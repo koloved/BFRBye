@@ -9,6 +9,10 @@ default_config = {
         "methods": ["csv"],   # options: "csv", "txt", "notion"
         "output_file": "output.csv"
     },
+    "processing": {
+        "interval": 1,         # frames between inference (1 = every frame)
+        "mouth_padding": 0.5   # mouth zone inflation factor
+    },
     "notion": {
         "database_id": "",
         "token": ""

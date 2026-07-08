@@ -7,6 +7,7 @@ from bfrbye.icon import icon
 from bfrbye.config import load_config, save_config
 from bfrbye.tracker import HandTracker
 
+
 def create_main_window():
     """
     Creates the main application window with Start, Preview, and Configuration buttons.
@@ -28,7 +29,7 @@ def create_main_window():
 
     def start_tracking():
         tracker_active[0] = True
-        root.iconify()  # Minimize window
+        root.iconify()
 
         thread = Thread(target=tracker.run, daemon=True)
         thread.start()
@@ -62,41 +63,67 @@ def create_main_window():
     preview_button = tk.Button(root, text="Preview", command=start_preview)
     preview_button.pack(pady=8)
 
-    config_button = tk.Button(root, text="Configuration", command=lambda: open_config_window(root, config))
+    config_button = tk.Button(root, text="Configuration",
+                              command=lambda: open_config_window(root, config))
     config_button.pack(pady=8)
 
     return root
 
+
 def open_config_window(parent, config):
     win = tk.Toplevel(parent)
     win.title("Configuration")
+    win.resizable(False, False)
 
-    # Notion token
-    tk.Label(win, text="Notion Token:").grid(row=0, column=0, sticky="w")
+    # ── Notion ─────────────────────────────────────────────────
+    tk.Label(win, text="Notion Token:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
     token_entry = tk.Entry(win, width=40)
     token_entry.insert(0, config["notion"].get("token", ""))
-    token_entry.grid(row=0, column=1, padx=5, pady=5)
+    token_entry.grid(row=0, column=1, padx=5, pady=3)
 
-    # Database ID
-    tk.Label(win, text="Database ID:").grid(row=1, column=0, sticky="w")
+    tk.Label(win, text="Database ID:").grid(row=1, column=0, sticky="w", padx=5, pady=3)
     db_entry = tk.Entry(win, width=40)
     db_entry.insert(0, config["notion"].get("database_id", ""))
-    db_entry.grid(row=1, column=1, padx=5, pady=5)
+    db_entry.grid(row=1, column=1, padx=5, pady=3)
 
-    # Storage methods (checkboxes)
-    tk.Label(win, text="Storage methods:").grid(row=2, column=0, sticky="w")
+    # ── Storage ────────────────────────────────────────────────
+    tk.Label(win, text="Storage methods:").grid(row=2, column=0, sticky="w", padx=5, pady=3)
     methods = {"csv": tk.BooleanVar(), "txt": tk.BooleanVar(), "notion": tk.BooleanVar()}
     for i, method in enumerate(methods):
         methods[method].set(method in config["storage"].get("methods", []))
-        tk.Checkbutton(win, text=method.upper(), variable=methods[method]).grid(row=2, column=1+i, padx=5)
+        tk.Checkbutton(win, text=method.upper(), variable=methods[method]).grid(
+            row=2, column=1 + i, padx=3
+        )
 
-    # Save button
+    # ── Processing ─────────────────────────────────────────────
+    proc = config.setdefault("processing", {})
+
+    tk.Label(win, text="Process interval:").grid(row=3, column=0, sticky="w", padx=5, pady=3)
+    interval_var = tk.IntVar(value=proc.get("interval", 1))
+    interval_spin = tk.Spinbox(win, from_=1, to=20, width=5,
+                               textvariable=interval_var)
+    interval_spin.grid(row=3, column=1, sticky="w", padx=5, pady=3)
+    tk.Label(win, text="frames (1 = every frame)").grid(row=3, column=1, columnspan=3,
+                                                         sticky="w", padx=75, pady=3)
+
+    tk.Label(win, text="Mouth zone:").grid(row=4, column=0, sticky="w", padx=5, pady=3)
+    pad_var = tk.DoubleVar(value=proc.get("mouth_padding", 0.5))
+    pad_scale = tk.Scale(win, from_=0.0, to=3.0, resolution=0.1,
+                         orient="horizontal", length=180,
+                         variable=pad_var, showvalue=True)
+    pad_scale.grid(row=4, column=1, columnspan=2, sticky="w", padx=5, pady=3)
+
+    # ── Save ───────────────────────────────────────────────────
     def save_and_close():
         config["notion"]["token"] = token_entry.get().strip()
         config["notion"]["database_id"] = db_entry.get().strip()
         config["storage"]["methods"] = [m for m, var in methods.items() if var.get()]
+        config["processing"]["interval"] = interval_var.get()
+        config["processing"]["mouth_padding"] = round(pad_var.get(), 1)
         save_config(config)
         messagebox.showinfo("Saved", "Configuration saved successfully")
         win.destroy()
 
-    tk.Button(win, text="Save", command=save_and_close).grid(row=3, column=0, columnspan=3, pady=10)
+    tk.Button(win, text="Save", command=save_and_close).grid(
+        row=5, column=0, columnspan=3, pady=12
+    )

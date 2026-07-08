@@ -22,6 +22,9 @@ output.txt
 
 /pics
 
+# Downloaded model files (regenerated via run.bat or manually)
+/models/
+
 # Environments
 .env
 .venv

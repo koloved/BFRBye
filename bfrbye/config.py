@@ -12,9 +12,10 @@ default_config = {
     "processing": {
         "interval": 1,         # frames between inference (1 = every frame)
         "mouth_padding": 0.5,   # mouth zone inflation factor
-        "trigger_frames": 5,    # consecutive detections before trigger
-        "cooldown": 2.0,         # seconds to ignore after trigger
-        "camera_width": 640,     # capture resolution
+        "trigger_frames": 5,    # consecutive detections to enter ACTIVE state
+        "min_duration": 0.5,    # seconds — minimum beep duration per episode
+        "cooldown": 0.5,        # seconds — pause after episode before next
+        "camera_width": 640,    # capture resolution
         "camera_height": 480
     },
     "notion": {

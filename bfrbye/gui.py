@@ -118,16 +118,23 @@ def open_config_window(parent, config):
     trigger_spin = tk.Spinbox(win, from_=1, to=30, width=5,
                               textvariable=trigger_var)
     trigger_spin.grid(row=5, column=1, sticky="w", padx=5, pady=3)
-    tk.Label(win, text=f"consecutive (current {trigger_var.get()})").grid(
+    tk.Label(win, text="frames to enter ACTIVE").grid(
         row=5, column=1, columnspan=3, sticky="w", padx=75, pady=3
     )
 
-    tk.Label(win, text="Cooldown:").grid(row=6, column=0, sticky="w", padx=5, pady=3)
-    cooldown_var = tk.DoubleVar(value=proc.get("cooldown", 2.0))
-    cooldown_scale = tk.Scale(win, from_=0.0, to=10.0, resolution=0.5,
+    tk.Label(win, text="Min duration:").grid(row=6, column=0, sticky="w", padx=5, pady=3)
+    mindur_var = tk.DoubleVar(value=proc.get("min_duration", 0.5))
+    mindur_scale = tk.Scale(win, from_=0.2, to=3.0, resolution=0.1,
+                            orient="horizontal", length=180,
+                            variable=mindur_var, showvalue=True)
+    mindur_scale.grid(row=6, column=1, columnspan=2, sticky="w", padx=5, pady=3)
+
+    tk.Label(win, text="Cooldown:").grid(row=7, column=0, sticky="w", padx=5, pady=3)
+    cooldown_var = tk.DoubleVar(value=proc.get("cooldown", 0.5))
+    cooldown_scale = tk.Scale(win, from_=0.0, to=5.0, resolution=0.1,
                               orient="horizontal", length=180,
                               variable=cooldown_var, showvalue=True)
-    cooldown_scale.grid(row=6, column=1, columnspan=2, sticky="w", padx=5, pady=3)
+    cooldown_scale.grid(row=7, column=1, columnspan=2, sticky="w", padx=5, pady=3)
 
     # ── Camera resolution ──────────────────────────────────────
     resolutions = [(160, 120), (320, 240), (424, 240), (640, 480), (848, 480), (960, 540), (1280, 720)]
@@ -138,10 +145,10 @@ def open_config_window(parent, config):
     cur_res = f"{cur_w}x{cur_h}"
     res_var = tk.StringVar(value=cur_res if cur_res in res_labels else res_labels[3])
 
-    tk.Label(win, text="Camera res:").grid(row=7, column=0, sticky="w", padx=5, pady=3)
+    tk.Label(win, text="Camera res:").grid(row=8, column=0, sticky="w", padx=5, pady=3)
     res_menu = tk.OptionMenu(win, res_var, *res_labels)
     res_menu.config(width=10)
-    res_menu.grid(row=7, column=1, sticky="w", padx=5, pady=3)
+    res_menu.grid(row=8, column=1, sticky="w", padx=5, pady=3)
 
     # ── Save ───────────────────────────────────────────────────
     def save_and_close():
@@ -151,6 +158,7 @@ def open_config_window(parent, config):
         config["processing"]["interval"] = interval_var.get()
         config["processing"]["mouth_padding"] = round(pad_var.get(), 1)
         config["processing"]["trigger_frames"] = trigger_var.get()
+        config["processing"]["min_duration"] = mindur_var.get()
         config["processing"]["cooldown"] = cooldown_var.get()
         w_str, h_str = res_var.get().split("x")
         config["processing"]["camera_width"] = int(w_str)
@@ -160,5 +168,5 @@ def open_config_window(parent, config):
         win.destroy()
 
     tk.Button(win, text="Save", command=save_and_close).grid(
-        row=8, column=0, columnspan=3, pady=12
+        row=9, column=0, columnspan=3, pady=12
     )

@@ -1,13 +1,12 @@
 import os
+import csv
 import cv2
 import mediapipe as mp
 import winsound
 import time
 import threading
 from datetime import datetime
-
-from bfrbye.dialog import show_input_dialog
-from bfrbye.storage import save_response
+from pathlib import Path
 
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -28,6 +27,11 @@ _MOUTH_INDICES = sorted(set(
 ) | set(
     c.end for c in _LIPS_CONNECTIONS
 ))
+
+# ── state machine ──────────────────────────────────────────────
+_IDLE = 0
+_ACTIVE = 1
+_COOLDOWN = 2
 
 
 class HandTracker:
@@ -58,34 +62,46 @@ class HandTracker:
         # Drawing references
         self.mp_hand_connections = HandLandmarksConnections.HAND_CONNECTIONS
 
-        # Tunable parameters (from config, overridable at runtime via preview hotkeys)
+        # Tunable parameters (from config)
         proc = config.get("processing", {})
-        self.processing_interval = proc.get("interval", 1)    # 1 = every frame
-        self.mouth_padding = proc.get("mouth_padding", 0.5)   # zone inflation
-        self.trigger_frames = proc.get("trigger_frames", 5)   # consecutive detections
-        self.cooldown = proc.get("cooldown", 2.0)             # seconds after trigger
+        self.processing_interval = proc.get("interval", 1)
+        self.mouth_padding = proc.get("mouth_padding", 0.5)
+        self.trigger_frames = proc.get("trigger_frames", 5)
+        self.min_duration = proc.get("min_duration", 0.5)
+        self.cooldown = proc.get("cooldown", 0.5)
         self._cam_w = proc.get("camera_width", 640)
         self._cam_h = proc.get("camera_height", 480)
 
         self.webcam = cv2.VideoCapture(0)
-        self._ensure_webcam()  # apply configured resolution
-        self.counter = 0
+        self._ensure_webcam()
+        self.counter = 0  # episode counter
 
-        # Debounce / anti-rattle state
+        # State machine
+        self._state = _IDLE
         self._consecutive = 0
-        self._last_trigger_time = 0.0
+        self._episode_start = 0.0  # when ACTIVE was entered
+        self._cooldown_until = 0.0  # when COOLDOWN expires
 
-    # ── helpers ────────────────────────────────────────────────
+        # Beep thread control
+        self._beep_active = False
+
+        # Episode log file (same dir as config)
+        self._episode_log = Path("episodes.csv")
+        if not self._episode_log.exists():
+            with open(self._episode_log, "w", newline="") as f:
+                csv.writer(f).writerow(["start_time", "end_time", "duration_s"])
+
+    # ── webcam ──────────────────────────────────────────────────
 
     def _ensure_webcam(self):
-        """Open or re-open webcam and apply configured resolution."""
         if not self.webcam.isOpened():
             self.webcam.open(0)
         self.webcam.set(cv2.CAP_PROP_FRAME_WIDTH, self._cam_w)
         self.webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, self._cam_h)
 
+    # ── inference ──────────────────────────────────────────────
+
     def _process(self, img_bgr):
-        """Run inference on one frame and return (face_result, hand_result)."""
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
         return (
@@ -93,59 +109,113 @@ class HandTracker:
             self.hand_landmarker.detect(mp_image),
         )
 
-    def _draw_hud(self, img_bgr, fps=None, cooldown_active=False):
-        """Draw debug HUD on the preview frame."""
+    # ── beep ────────────────────────────────────────────────────
+
+    def _beep_loop(self):
+        """Daemon thread: short beeps while self._beep_active is True."""
+        while self._beep_active:
+            winsound.Beep(1500, 120)
+            time.sleep(0.04)
+
+    def _start_beep(self):
+        if self._beep_active:
+            return
+        self._beep_active = True
+        t = threading.Thread(target=self._beep_loop, daemon=True)
+        t.start()
+
+    def _stop_beep(self):
+        self._beep_active = False
+
+    # ── episode log ─────────────────────────────────────────────
+
+    def _save_episode(self, start, end):
+        dur = round(end - start, 1)
+        with open(self._episode_log, "a", newline="") as f:
+            csv.writer(f).writerow([
+                datetime.fromtimestamp(start).isoformat(),
+                datetime.fromtimestamp(end).isoformat(),
+                f"{dur}s",
+            ])
+        print(f"Episode: start={datetime.fromtimestamp(start).isoformat()}, duration={dur}s")
+
+    # ── state machine ───────────────────────────────────────────
+
+    def _update_state(self, picked, now):
+        """Tick the state machine once per processed frame. Returns (beep_on, just_logged)."""
+        beep_on = False
+        just_logged = False
+
+        if self._state == _IDLE:
+            if picked:
+                self._consecutive += 1
+                if self._consecutive >= self.trigger_frames:
+                    # Enter ACTIVE
+                    self._state = _ACTIVE
+                    self._episode_start = now
+                    self._consecutive = 0
+                    self._start_beep()
+                    beep_on = True
+            else:
+                self._consecutive = 0
+
+        elif self._state == _ACTIVE:
+            elapsed = now - self._episode_start
+            beep_on = True  # keep beeping
+
+            if not picked and elapsed >= self.min_duration:
+                # Episode complete
+                self._stop_beep()
+                self.counter += 1
+                self._save_episode(self._episode_start, now)
+                just_logged = True
+                self._state = _COOLDOWN
+                self._cooldown_until = now + self.cooldown
+                beep_on = False
+
+        elif self._state == _COOLDOWN:
+            if now >= self._cooldown_until:
+                self._state = _IDLE
+                self._consecutive = 0
+
+        return beep_on, just_logged
+
+    # ── HUD ─────────────────────────────────────────────────────
+
+    def _draw_hud(self, img_bgr, fps=None):
         now = time.time()
-        since_trigger = now - self._last_trigger_time if self._last_trigger_time else 99
-        cooldown_remaining = max(0, round(self.cooldown - since_trigger, 1))
+        state_labels = {_IDLE: "IDLE", _ACTIVE: "ACTIVE", _COOLDOWN: "COOLDOWN"}
+        label = state_labels.get(self._state, "?")
 
         lines = [
             f"Interval: {self.processing_interval}  ([ ])   "
-            f"Consec: {self._consecutive}/{self.trigger_frames}",
+            f"State: {label}",
             f"Padding:  {self.mouth_padding:.1f}  (- =)     "
-            f"Cooldown: {cooldown_remaining}s",
-            f"Triggers: {self.counter}",
+            f"Consec: {self._consecutive}/{self.trigger_frames}",
+            f"Episodes: {self.counter}",
         ]
+        if self._state == _ACTIVE:
+            elapsed = now - self._episode_start
+            lines.insert(0, f">>> BEEP ({elapsed:.1f}s)")
+        elif self._state == _COOLDOWN:
+            left = max(0, self._cooldown_until - now)
+            lines.insert(0, f"--- cooldown {left:.1f}s ---")
+
         if fps is not None:
             lines.insert(0, f"FPS: {fps}")
         for i, line in enumerate(lines):
             cv2.putText(img_bgr, line, (12, 30 + i * 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 200), 2,
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2,
                         cv2.LINE_AA)
 
-    # ── debounce ───────────────────────────────────────────────
-
-    def _apply_debounce(self, picked):
-        """Return True only if detection is sustained and cooldown elapsed."""
-        now = time.time()
-
-        if picked:
-            self._consecutive += 1
-        else:
-            self._consecutive = 0
-            return False
-
-        if self._consecutive < self.trigger_frames:
-            return False  # not enough consecutive frames yet
-
-        # Enough frames — check cooldown
-        if now - self._last_trigger_time < self.cooldown:
-            return False
-
-        # TRIGGER
-        self._last_trigger_time = now
-        self._consecutive = 0
-        return True
-
-    # ── modes ──────────────────────────────────────────────────
+    # ── run (background) ────────────────────────────────────────
 
     def run(self):
-        """Background tracking mode — no window, just triggers on detection."""
-        # Re-read camera resolution from config (may have changed via GUI)
         proc = self.config.get("processing", {})
         self._cam_w = proc.get("camera_width", 640)
         self._cam_h = proc.get("camera_height", 480)
         self._ensure_webcam()
+
         while self.webcam.isOpened():
             ret, img_bgr = self.webcam.read()
             if not ret:
@@ -155,29 +225,24 @@ class HandTracker:
             img_bgr = cv2.cvtColor(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB),
                                     cv2.COLOR_RGB2BGR)
 
+            picked = False
             if hand_result.hand_landmarks and face_result.face_landmarks:
                 picked, _ = self.detect_fingertips_near_mouth(
                     img_bgr, face_result, hand_result, draw=False
                 )
-                if self._apply_debounce(picked):
-                    winsound.Beep(1500, 1000)
-                    response = []
-                    thread = threading.Thread(target=show_input_dialog, args=(response,))
-                    thread.start()
-                    thread.join()
 
-                    if len(response):
-                        save_response(response[0], self.config)
-            else:
-                self._consecutive = 0
+            now = time.time()
+            self._update_state(picked, now)
+            time.sleep(0.005)  # tiny breath to avoid busy-wait spinning
 
-        time.sleep(2)
+        time.sleep(1)
+        self._stop_beep()
         self.webcam.release()
         cv2.destroyAllWindows()
 
+    # ── run_preview ─────────────────────────────────────────────
+
     def run_preview(self):
-        """Preview mode — shows camera feed with overlays in an OpenCV window."""
-        # Re-read all tunable parameters from config (may have changed via GUI)
         proc = self.config.get("processing", {})
         self.processing_interval = proc.get("interval", 1)
         self.mouth_padding = proc.get("mouth_padding", 0.5)
@@ -190,7 +255,7 @@ class HandTracker:
         cv2.resizeWindow(window_name, 960, 720)
 
         frame_count = 0
-        last_overlay = None   # cache last annotated frame for skipped intervals
+        last_overlay = None
         fps_timer = time.time()
         fps_counter = 0
         fps_display = 0
@@ -202,16 +267,14 @@ class HandTracker:
 
             frame_count += 1
             fps_counter += 1
+            now = time.time()
 
-            # FPS display update every ~30 frames
             if fps_counter >= 30:
-                now = time.time()
                 elapsed = now - fps_timer
                 fps_display = int(fps_counter / elapsed) if elapsed > 0 else 0
                 fps_counter = 0
                 fps_timer = now
 
-            # Decide whether to run inference this frame
             do_process = (frame_count % self.processing_interval == 0)
 
             if do_process:
@@ -219,30 +282,32 @@ class HandTracker:
                 display = cv2.cvtColor(cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB),
                                        cv2.COLOR_RGB2BGR)
 
-                trigger = False
+                picked = False
                 if hand_result.hand_landmarks and face_result.face_landmarks:
                     picked, display = self.detect_fingertips_near_mouth(
                         display, face_result, hand_result, draw=True
                     )
-                    trigger = self._apply_debounce(picked)
-                else:
-                    self._consecutive = 0
 
-                if trigger:
-                    cv2.putText(display, "TRIGGER!", (20, 60),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                beep_on, just_logged = self._update_state(picked, now)
+
+                if beep_on:
+                    cv2.putText(display, "!!! BEEP !!!", (20, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 255), 3)
+                if just_logged:
+                    cv2.putText(display, "LOGGED", (20, 100),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 3)
 
                 last_overlay = display.copy()
             else:
-                # Skipped frame — reset consecutive (we don't know hand is still there)
-                self._consecutive = 0
-                # Show last overlay or raw frame
+                # Skipped frame — state machine not ticked, but consecutive resets
+                # (we don't know if hand is still there)
+                if self._state == _IDLE:
+                    self._consecutive = 0
                 display = last_overlay.copy() if last_overlay is not None else raw_bgr.copy()
 
             self._draw_hud(display, fps_display)
             cv2.imshow(window_name, display)
 
-            # ── hotkeys ────────────────────────────────────────
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
@@ -258,13 +323,13 @@ class HandTracker:
                 self.processing_interval = self.config.get("processing", {}).get("interval", 1)
                 self.mouth_padding = self.config.get("processing", {}).get("mouth_padding", 0.5)
 
+        self._stop_beep()
         self.webcam.release()
         cv2.destroyWindow(window_name)
 
     # ── detection ──────────────────────────────────────────────
 
     def detect_fingertips_near_mouth(self, img_bgr, face_result, hand_result, draw=True):
-        """Check if any fingertip is near the mouth area using Face Landmarker."""
         h, w, _ = img_bgr.shape
         picked = 0
 
@@ -288,7 +353,7 @@ class HandTracker:
         if not mouth_pts:
             return False, img_bgr
 
-        # --- Mouth bounding box (normalized) ---
+        # --- Mouth bounding box ---
         mouth_x = [p[0] for p in mouth_pts]
         mouth_y = [p[1] for p in mouth_pts]
         mx_min, mx_max = min(mouth_x), max(mouth_x)
@@ -325,8 +390,6 @@ class HandTracker:
                     continue
                 if (mx_min <= lm.x <= mx_max) and (my_min <= lm.y <= my_max):
                     picked += 1
-                    self.counter += 1
-                    print(self.counter)
                     break
 
         return picked > 0, img_bgr
